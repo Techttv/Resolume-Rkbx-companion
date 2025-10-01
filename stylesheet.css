@@ -1,0 +1,22 @@
+
+@font-face {
+    font-family: "Lexend"; 
+    src: url("font/Lexend-VariableFont_wght"); 
+}
+
+QWidget {
+    background-color: rgb(36, 99, 181);           
+                color: rgb(255, 255, 255); /* Per rendere leggibile il testo sul fondo scuro */
+                border-radius: 0px 20px 20px 0px; /* Aggiungi angoli arrotondati, opzionale */
+            }
+QLabel {
+    background-color: rgba(69, 157, 245, 0.399);
+    border: none;
+    border-radius: 5px;
+    padding: 6px;
+    font-family: 'Lexend';
+    font-weight: bold;
+    font-size: 13px;
+    
+}
+
