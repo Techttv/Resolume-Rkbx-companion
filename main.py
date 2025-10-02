@@ -5,14 +5,77 @@ import time
 import requests
 import io
 import threading
+import configparser
+import base64
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QThread, pyqtSignal, QObject, QTimer, QRect
 from PyQt6.QtGui import QGuiApplication, QPixmap, QCursor
 from pythonosc.dispatcher import Dispatcher
 from pythonosc.osc_server import BlockingOSCUDPServer
+from pythonosc.udp_client import SimpleUDPClient
 
 # Importa la tua UI
-from ui import FinestraOverlay
+from ui import FinestraOverlay, SettingsDialog
+
+# --- GESTORE IMPOSTAZIONI ---
+class SettingsManager:
+    def __init__(self, filename="config.ini"):
+        self.filename = filename
+        self.config = configparser.ConfigParser()
+        self.defaults = {
+            'osc': {
+                'ip': '127.0.0.1',
+                'port': '7000',
+                'resolume_ip': '127.0.0.1',
+                'resolume_port': '7001'
+            },
+            'osc_paths': {
+                'deck1_title': '/track/0/title',
+                'deck1_artist': '/track/0/artist',
+                'deck1_album': '/track/0/album',
+                'deck1_time': '/time/0',
+                'deck2_title': '/track/1/title',
+                'deck2_artist': '/track/1/artist',
+                'deck2_album': '/track/1/album',
+                'deck2_time': '/time/1',
+                'bpm': '/bpm/master/current',
+                'beat': '/beat/master',
+                'resolume_bpm': '/composition/tempocontroller/tempo'
+            },
+            'spotify': {
+                'client_id': 'IL_TUO_CLIENT_ID',
+                'client_secret': 'IL_TUO_CLIENT_SECRET'
+            }
+        }
+        self.load()
+
+    def load(self):
+        if not self.config.read(self.filename):
+            print("File config.ini non trovato. Creazione con valori predefiniti.")
+            self.config.read_dict(self.defaults)
+            self.save()
+        # Assicura che tutte le sezioni e chiavi predefinite esistano
+        for section, keys in self.defaults.items():
+            if not self.config.has_section(section):
+                self.config.add_section(section)
+            for key, value in keys.items():
+                if not self.config.has_option(section, key):
+                    self.config.set(section, key, value)
+        self.save() # Salva eventuali chiavi mancanti
+
+    def get(self, section, key):
+        return self.config.get(section, key, fallback=self.defaults.get(section, {}).get(key))
+
+    def get_section(self, section):
+        return dict(self.config.items(section))
+
+    def save(self):
+        with open(self.filename, 'w') as configfile:
+            self.config.write(configfile)
+
+    def update_from_dict(self, settings_dict):
+        self.config.read_dict(settings_dict)
+        self.save()
 
 # --- CLASSE PER GESTIRE IL DOWNLOAD DELLE COPERTINE (ORA FLESSIBILE) ---
 class CoverDownloader(QObject):
@@ -36,54 +99,80 @@ class CoverDownloader(QObject):
         thread.daemon = True
         thread.start()
     
+    def _search_itunes(self, artist, title, album):
+        """Tenta di trovare la traccia su iTunes. Restituisce (cover_url, duration_seconds)."""
+        print(f"Ricerca su iTunes per: '{artist} - {title}'")
+        search_query = f"{artist} {title}"
+        if album:
+            search_query += f" {album}"
+        
+        params = {'term': search_query, 'media': 'music', 'entity': 'song', 'limit': 1}
+        url = "https://itunes.apple.com/search"
+        
+        response = requests.get(url, params=params, timeout=5)
+        response.raise_for_status()
+        data = response.json()
+
+        if data.get('results'):
+            result = data['results'][0]
+            cover_url = result.get('artworkUrl100', '').replace('100x100', '600x600')
+            duration_ms = result.get('trackTimeMillis', 0)
+            print("Trovato su iTunes.")
+            return cover_url, duration_ms / 1000.0
+        
+        print("Non trovato su iTunes.")
+        return None, 0
+
+    def _search_deezer(self, artist, title, album):
+        """Tenta di trovare la traccia su Deezer. Restituisce (cover_url, duration_seconds)."""
+        print(f"Fallback: ricerca su Deezer per: '{artist} - {title}'")
+        # La query di Deezer è più efficace con le virgolette
+        query = f'artist:"{artist}" track:"{title}"'
+        
+        params = {'q': query, 'limit': 1}
+        url = "https://api.deezer.com/search"
+        
+        response = requests.get(url, params=params, timeout=5)
+        response.raise_for_status()
+        data = response.json()
+
+        if data.get('data'):
+            result = data['data'][0]
+            # Deezer fornisce URL per diverse dimensioni, prendiamo la più grande
+            album_info = result.get('album', {})
+            cover_url = album_info.get('cover_xl') or album_info.get('cover_big')
+            duration = result.get('duration', 0)
+            print("Trovato su Deezer.")
+            return cover_url, float(duration)
+
+        print("Non trovato su Deezer.")
+        return None, 0
+
     def _download_worker(self, deck_number, artist, title, album):
+        cover_url, duration_seconds = None, 0
         try:
-            params = {}
-            # --- LOGICA DI RICERCA FLESSIBILE ---
-            # Se abbiamo l'album, la priorità è cercare quello.
-            if artist and album:
-                search_query = f"{artist} {album}"
-                params = {'term': search_query, 'media': 'music', 'entity': 'album', 'limit': 1}
-                print(f"Ricerca PRIORITARIA per ALBUM: '{search_query}'")
-            # Altrimenti, ripieghiamo sulla ricerca per canzone (artista + titolo).
-            elif artist and title:
-                search_query = f"{artist} {title}"
-                params = {'term': search_query, 'media': 'music', 'entity': 'song', 'limit': 1}
-                print(f"Ricerca FALLBACK per CANZONE: '{search_query}'")
-            # Se non abbiamo neanche i dati minimi, non facciamo nulla.
-            else:
-                return
-
-            url = "https://itunes.apple.com/search"
-            response = requests.get(url, params=params, timeout=5)
-            response.raise_for_status()
-            data = response.json()
-
-            cover_url = None
-            duration_ms = 0
-            if data.get('results'):
-                result = data['results'][0]
-                cover_url = result.get('artworkUrl100', '').replace('100x100', '600x600')
-                # La durata è disponibile solo se abbiamo cercato per 'song'
-                if params.get('entity') == 'song':
-                    duration_ms = result.get('trackTimeMillis', 0)
-
+            # 1. Prova con iTunes
+            cover_url, duration_seconds = self._search_itunes(artist, title, album)
+            
+            # 2. Se iTunes fallisce, prova con Deezer (fallback)
             if not cover_url:
-                print(f"Copertina non trovata per: {search_query}")
-                return
-
+                cover_url, duration_seconds = self._search_deezer(artist, title, album)
+        
+        except Exception as e:
+            print(f"Errore durante la ricerca della copertina: {e}")
+        
+        # 3. Se abbiamo trovato una copertina, scaricala
+        try:
+            if not cover_url: return
             img_response = requests.get(cover_url, timeout=5)
             img_response.raise_for_status()
             img_data = img_response.content
             
             pixmap = QPixmap()
             pixmap.loadFromData(img_data)
-            
-            duration_seconds = duration_ms / 1000.0
             self.cover_ready.emit(deck_number, pixmap, duration_seconds)
-            
         except Exception as e:
-            print(f"Errore durante il download della copertina: {e}")
+            print(f"Errore durante il download dell'immagine da {cover_url}: {e}")
 
 # --- THREAD PER IL SERVER OSC ---
 class OSCServerThread(QObject):
@@ -95,11 +184,17 @@ class OSCServerThread(QObject):
     beat_signal = pyqtSignal(int)
     request_cover = pyqtSignal(int, str, str, str)
 
-    def __init__(self, ip="127.0.0.1", port=7000):
+    def __init__(self, settings_manager):
         super().__init__()
-        self.ip = ip
-        self.port = port
+        self.settings = settings_manager
+        self.ip = self.settings.get('osc', 'ip')
+        self.port = int(self.settings.get('osc', 'port'))
         self.server = None
+        
+        resolume_ip = self.settings.get('osc', 'resolume_ip')
+        resolume_port = int(self.settings.get('osc', 'resolume_port'))
+        # Client OSC per inviare dati a Resolume (o altro)
+        self.resolume_client = SimpleUDPClient(resolume_ip, resolume_port)
         
         self.track_info = {
             0: {'title': '', 'artist': '', 'album': ''},
@@ -109,17 +204,18 @@ class OSCServerThread(QObject):
 
     def run(self):
         dispatcher = Dispatcher()
-        # Mappature...
-        dispatcher.map("/track/0/title", lambda addr, *args: self.handle_title(0, addr, *args))
-        dispatcher.map("/track/0/artist", lambda addr, *args: self.handle_artist(0, addr, *args))
-        dispatcher.map("/track/0/album", lambda addr, *args: self.handle_album(0, addr, *args))
-        dispatcher.map("/time/0", lambda addr, *args: self.handle_time(0, addr, *args))
-        dispatcher.map("/track/1/title", lambda addr, *args: self.handle_title(1, addr, *args))
-        dispatcher.map("/track/1/artist", lambda addr, *args: self.handle_artist(1, addr, *args))
-        dispatcher.map("/track/1/album", lambda addr, *args: self.handle_album(1, addr, *args))
-        dispatcher.map("/time/1", lambda addr, *args: self.handle_time(1, addr, *args))
-        dispatcher.map("/bpm/master/current", self.handle_bpm)
-        dispatcher.map("/beat/master", self.handle_beat)
+        paths = self.settings.get_section('osc_paths')
+        
+        dispatcher.map(paths['deck1_title'], lambda addr, *args: self.handle_title(0, addr, *args))
+        dispatcher.map(paths['deck1_artist'], lambda addr, *args: self.handle_artist(0, addr, *args))
+        dispatcher.map(paths['deck1_album'], lambda addr, *args: self.handle_album(0, addr, *args))
+        dispatcher.map(paths['deck1_time'], lambda addr, *args: self.handle_time(0, addr, *args))
+        dispatcher.map(paths['deck2_title'], lambda addr, *args: self.handle_title(1, addr, *args))
+        dispatcher.map(paths['deck2_artist'], lambda addr, *args: self.handle_artist(1, addr, *args))
+        dispatcher.map(paths['deck2_album'], lambda addr, *args: self.handle_album(1, addr, *args))
+        dispatcher.map(paths['deck2_time'], lambda addr, *args: self.handle_time(1, addr, *args))
+        dispatcher.map(paths['bpm'], self.handle_bpm)
+        dispatcher.map(paths['beat'], self.handle_beat)
         
         self.server = BlockingOSCUDPServer((self.ip, self.port), dispatcher)
         print(f"Server OSC in ascolto su {self.ip}:{self.port}")
@@ -174,17 +270,29 @@ class OSCServerThread(QObject):
         self._check_and_request_cover(deck)
 
     def handle_time(self, deck, address, *args):
-        if args: self.deck_time_signal.emit(deck, float(args[0]))
+        if args: 
+            self.deck_time_signal.emit(deck, float(args[0]))
+            print(f"\n{time.strftime('%H:%M:%S')} - Deck {deck} Time: {args[0]}s")
     def handle_bpm(self, address, *args):
         if args: self.bpm_signal.emit(float(args[0]))
+        if args:
+            bpm = float(args[0])
+            # Emetti il segnale per aggiornare la UI
+            self.bpm_signal.emit(bpm)
+            # Inoltra il BPM a Resolume sulla porta 7001
+            resolume_path = self.settings.get('osc_paths', 'resolume_bpm')
+            bpmr = (bpm -20 )*0.002083
+            self.resolume_client.send_message(resolume_path, bpmr)
+            print(f"Inoltrato BPM: {bpm} a {self.resolume_client.address}:{self.resolume_client.port} su path {resolume_path}")
     def handle_beat(self, address, *args):
         if args: self.beat_signal.emit(int(args[0]))
 
-# --- FUNZIONE MAIN (INVARIATA) ---
+# --- FUNZIONE MAIN ---
 def main():
     app = QApplication(sys.argv)
-    finestra = FinestraOverlay()
+    settings_manager = SettingsManager()
 
+    finestra = FinestraOverlay()
     HOT_ZONE_HEIGHT = 15
     primary_screen = QGuiApplication.primaryScreen().geometry()
     hot_zone = QRect(
@@ -202,30 +310,66 @@ def main():
     mouse_check_timer.timeout.connect(check_mouse_position)
     mouse_check_timer.start()
 
-    cover_downloader = CoverDownloader()
+    # --- GESTIONE THREAD OSC ---
     osc_thread = QThread()
-    osc_server = OSCServerThread()
+    osc_server = OSCServerThread(settings_manager)
     osc_server.moveToThread(osc_thread)
+
+    def start_osc_server():
+        if not osc_thread.isRunning():
+            osc_thread.started.connect(osc_server.run)
+            osc_thread.start()
+
+    def stop_osc_server():
+        if osc_thread.isRunning():
+            osc_server.stop()
+            osc_thread.quit()
+            osc_thread.wait()
+
+    def restart_osc_server():
+        print("Riavvio del server OSC con le nuove impostazioni...")
+        stop_osc_server()
+        # Ricrea l'istanza del server con le nuove impostazioni
+        nonlocal osc_server
+        osc_server = OSCServerThread(settings_manager)
+        osc_server.moveToThread(osc_thread)
+        connect_signals() # Riconnetti i segnali alla nuova istanza
+        start_osc_server()
+        print("Server OSC riavviato.")
+
+    # --- GESTIONE FINESTRA IMPOSTAZIONI ---
+    def open_settings():
+        # Crea un dizionario completo delle impostazioni attuali
+        current_settings = {
+            'osc': settings_manager.get_section('osc'),
+            'osc_paths': settings_manager.get_section('osc_paths'),
+            'spotify': settings_manager.get_section('spotify')
+        }
+        dialog = SettingsDialog(current_settings, finestra)
+        dialog.settings_saved.connect(on_settings_saved)
+        dialog.exec()
+
+    def on_settings_saved(new_settings):
+        settings_manager.update_from_dict(new_settings)
+        restart_osc_server()
+
+    # --- COLLEGAMENTO SEGNALI ---
+    cover_downloader = CoverDownloader()
+    def connect_signals():
+        osc_server.deck_title_signal.connect(finestra.update_deck_title)
+        osc_server.deck_artist_signal.connect(finestra.update_deck_artist)
+        osc_server.deck_album_signal.connect(finestra.update_deck_album)
+        osc_server.deck_time_signal.connect(finestra.update_deck_time)
+        osc_server.bpm_signal.connect(finestra.update_bpm)
+        osc_server.beat_signal.connect(finestra.update_beat)
+        osc_server.request_cover.connect(cover_downloader.download_cover)
     
-    osc_server.deck_title_signal.connect(finestra.update_deck_title)
-    osc_server.deck_artist_signal.connect(finestra.update_deck_artist)
-    osc_server.deck_album_signal.connect(finestra.update_deck_album)
-    osc_server.deck_time_signal.connect(finestra.update_deck_time)
-    osc_server.bpm_signal.connect(finestra.update_bpm)
-    osc_server.beat_signal.connect(finestra.update_beat)
-    osc_server.request_cover.connect(cover_downloader.download_cover)
+    connect_signals()
     cover_downloader.cover_ready.connect(finestra.update_deck_cover)
+    finestra.open_settings_requested.connect(open_settings)
     
-    osc_thread.started.connect(osc_server.run)
-    osc_thread.start()
-
-    def cleanup():
-        print("Chiusura in corso...")
-        osc_server.stop()
-        osc_thread.quit()
-        osc_thread.wait()
-
-    app.aboutToQuit.connect(cleanup)
+    start_osc_server()
+    app.aboutToQuit.connect(stop_osc_server)
     sys.exit(app.exec())
 
 if __name__ == '__main__':

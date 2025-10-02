@@ -1,14 +1,16 @@
-
 @font-face {
-    font-family: "Lexend"; 
-    src: url("font/Lexend-VariableFont_wght"); 
+    font-family: "Lexend";
+    src: url("font/Lexend-VariableFont_wght");
 }
 
 QWidget {
-    background-color: rgb(36, 99, 181);           
-                color: rgb(255, 255, 255); /* Per rendere leggibile il testo sul fondo scuro */
-                border-radius: 0px 20px 20px 0px; /* Aggiungi angoli arrotondati, opzionale */
-            }
+    background-color: rgb(36, 99, 181);
+    color: rgb(255, 255, 255);
+    /* Per rendere leggibile il testo sul fondo scuro */
+    border-radius: 0px 20px 20px 0px;
+    /* Aggiungi angoli arrotondati, opzionale */
+}
+
 QLabel {
     background-color: rgba(69, 157, 245, 0.399);
     border: none;
@@ -17,6 +19,49 @@ QLabel {
     font-family: 'Lexend';
     font-weight: bold;
     font-size: 13px;
-    
+
 }
 
+/* QWidget {
+    background-color: rgba(20, 20, 25, 230);
+    color: #ffffff;
+    font-family: 'Segoe UI', Arial, sans-serif;
+    font-size: 14px;
+} */
+
+QLabel#deck_title {
+    font-size: 16px;
+    font-weight: bold;
+    color: #ffffff;
+}
+
+QLabel#deck_artist {
+    font-size: 15px;
+    color: #b0b0b0;
+}
+
+QLabel#time_label {
+    font-size: 13px;
+    color: #808080;
+
+}
+
+QLabel#bpm_label {
+    font-size: 20px;
+    font-weight: bold;
+    color: #ffffff;
+}
+
+QLabel#beat_label {
+    font-size: 16px;
+    color: #cfcfcf;
+}
+
+QPushButton#settings_button {
+    background-color: transparent;
+    border: none;
+}
+
+QPushButton#settings_button:hover {
+    background-color: rgba(255, 255, 255, 20);
+}

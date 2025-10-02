@@ -1,12 +1,16 @@
 # ui.py (versione corretta e più robusta)
 
 import sys
+from functools import partial
 from datetime import timedelta
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QPushButton, QLabel, QStyleFactory, QHBoxLayout
-from PyQt6.QtCore import Qt, QRect, pyqtSlot, QPointF, QTimer
-from PyQt6.QtGui import QGuiApplication, QPixmap, QKeyEvent, QPainter, QColor, QFontDatabase, QFont, QCursor, QPainterPath
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QPushButton, QLabel, QStyleFactory, QHBoxLayout, QDialog, QFormLayout, QLineEdit, QDialogButtonBox, QScrollArea
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QPushButton, QLabel, QStyleFactory, QHBoxLayout, QDialog, QFormLayout, QLineEdit, QDialogButtonBox, QScrollArea, QStyle
+from PyQt6.QtCore import Qt, QRect, pyqtSlot, QPointF, QTimer, pyqtSignal
+from PyQt6.QtGui import QGuiApplication, QPixmap, QKeyEvent, QPainter, QColor, QFontDatabase, QFont, QCursor, QPainterPath, QIcon
 
 class FinestraOverlay(QWidget):
+    open_settings_requested = pyqtSignal()
+
     def __init__(self):
         super().__init__()
         # Abilita il tracking del mouse per ricevere leaveEvent in modo affidabile
@@ -33,6 +37,8 @@ class FinestraOverlay(QWidget):
         if event.key() == Qt.Key.Key_Escape:
             self.close()
             QGuiApplication.quit()
+        elif event.key() == Qt.Key.Key_F1:
+            self.open_settings_requested.emit()
         else:
             super().keyPressEvent(event)
             
@@ -107,17 +113,18 @@ class FinestraOverlay(QWidget):
         self.centrale_beat = QLabel("")
         self.centrale_status = CircleLabel(size=20, color=QColor(255, 60, 60))
 
+
         self.centrale_bpm.setObjectName("bpm_label")
         self.centrale_beat.setObjectName("beat_label")
         self.centrale_bpm.setMinimumWidth(150)
         self.centrale_bpm.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.centrale_beat.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.centrale_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        
+
+
         self.centrale = QVBoxLayout()
         self.centrale.addWidget(self.centrale_bpm)
         self.centrale.addWidget(self.centrale_beat)
-        self.centrale.addWidget(self.centrale_status)
+        self.centrale.addWidget(self.centrale_status, alignment=Qt.AlignmentFlag.AlignCenter)
         self.layout_principale.addLayout(self.centrale)
         
     def setup_secondo_deck(self):
@@ -163,18 +170,7 @@ class FinestraOverlay(QWidget):
 
     def setup_stylesheet(self):
         default_stylesheet = """
-        QWidget {
-            background-color: rgba(20, 20, 25, 230); color: #ffffff;
-            font-family: 'Segoe UI', Arial, sans-serif; font-size: 14px;
-        }
-        QLabel#deck_title { font-size: 18px; font-weight: bold; color: #ffffff; }
-        QLabel#deck_artist { font-size: 15px; color: #b0b0b0; }
-        QLabel#time_label {
-            font-size: 13px; color: #808080;
-            font-family: 'Consolas', 'Courier New', monospace;
-        }
-        QLabel#bpm_label { font-size: 24px; font-weight: bold; color: #00ff88; }
-        QLabel#beat_label { font-size: 14px; color: #a0a0a0; }
+        
         """
         try:
             with open("stylesheet.css", 'r') as f:
@@ -203,24 +199,22 @@ class FinestraOverlay(QWidget):
         secs = int(seconds % 60)
         return f"{minutes:02d}:{secs:02d}"
 
-    # --- ### BLOCCO DI CODICE CORRETTO ### ---
     def update_time_display(self):
         """Aggiorna il display del tempo per entrambi i deck in modo robusto."""
         for deck in [0, 1]:
             data = self.track_data[deck]
             
-            # 1. Gestisci e formatta il tempo corrente
-            #    Mostra il tempo solo se è un numero valido (>= 0)
+            # 1. Formatta il tempo corrente. Mostra "--:--" se non valido.
             current_time_str = self.format_time(data['current_time'])
             
-            # 2. Gestisci e formatta il tempo rimanente
-            #    Mostra il tempo rimanente solo se la durata è valida (> 0)
+            # 2. Calcola e formatta il tempo rimanente.
+            #    È possibile solo se abbiamo una durata valida (> 0) e un tempo corrente valido.
+            remaining_time_str = "--:--"
             if data['duration'] > 0 and data['current_time'] >= 0:
                 remaining = data['duration'] - data['current_time']
-                remaining = max(0, remaining) # Evita valori negativi
+                # Assicura che il tempo rimanente non sia negativo
+                remaining = max(0, remaining) 
                 remaining_time_str = f"-{self.format_time(remaining)}"
-            else:
-                remaining_time_str = "--:--"
                 
             # 3. Assegna le stringhe formattate alle etichette corrette
             if deck == 0:
@@ -283,6 +277,7 @@ class FinestraOverlay(QWidget):
 
     @pyqtSlot(int)
     def update_beat(self, beat):
+        beat+=1  # Perché i beat partono da 0
         self.centrale_beat.setText(f"{beat}")
         if beat == 1:
             self.centrale_status.pulse()
@@ -320,3 +315,65 @@ class CircleLabel(QLabel):
     def reset_color(self):
         self.color = self.base_color
         self.update()
+
+class SettingsDialog(QDialog):
+    settings_saved = pyqtSignal(dict)
+
+    def __init__(self, settings, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Impostazioni")
+        self.setMinimumSize(500, 400)
+        self.settings = settings
+        self.line_edits = {}
+
+        layout = QVBoxLayout(self)
+
+        # Area scrollabile per contenere tutte le impostazioni
+        scroll_area = QScrollArea(self)
+        scroll_area.setWidgetResizable(True)
+        layout.addWidget(scroll_area)
+
+        container = QWidget()
+        form_layout = QFormLayout(container)
+        
+        # Sezione OSC
+        form_layout.addRow(self.create_section_label("Server OSC"))
+        self.add_setting_row(form_layout, "osc", "ip", "Indirizzo IP")
+        self.add_setting_row(form_layout, "osc", "port", "Porta")
+
+        # Sezione Path OSC
+        form_layout.addRow(self.create_section_label("Percorsi OSC"))
+        for key in self.settings.get('osc_paths', {}):
+            self.add_setting_row(form_layout, "osc_paths", key, f"Path: {key}")
+
+        # Sezione Spotify
+        form_layout.addRow(self.create_section_label("Spotify API"))
+        self.add_setting_row(form_layout, "spotify", "client_id", "Client ID")
+        self.add_setting_row(form_layout, "spotify", "client_secret", "Client Secret")
+
+        scroll_area.setWidget(container)
+
+        # Pulsanti Salva/Annulla
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+    def create_section_label(self, text):
+        label = QLabel(text)
+        label.setStyleSheet("font-size: 16px; font-weight: bold; margin-top: 10px;")
+        return label
+
+    def add_setting_row(self, layout, section, key, label_text):
+        value = self.settings.get(section, {}).get(key, "")
+        line_edit = QLineEdit(str(value))
+        layout.addRow(label_text, line_edit)
+        self.line_edits[(section, key)] = line_edit
+
+    def accept(self):
+        # Aggiorna il dizionario delle impostazioni con i nuovi valori
+        for (section, key), line_edit in self.line_edits.items():
+            if section not in self.settings: self.settings[section] = {}
+            self.settings[section][key] = line_edit.text()
+        self.settings_saved.emit(self.settings)
+        super().accept()
